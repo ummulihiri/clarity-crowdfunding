@@ -10,11 +10,15 @@
 (define-constant err-already-claimed (err u105))
 (define-constant err-insufficient-balance (err u106))
 (define-constant err-invalid-deadline (err u107))
+(define-constant err-contract-paused (err u108))
 
 ;; Campaign status
 (define-data-var campaign-status-active uint u1)
 (define-data-var campaign-status-ended uint u2)
 (define-data-var campaign-status-claimed uint u3)
+
+;; Contract status
+(define-data-var contract-paused bool false)
 
 ;; Data structures
 (define-map campaigns
@@ -37,16 +41,30 @@
 ;; Data variables
 (define-data-var next-campaign-id uint u1)
 
-;; Public functions
+;; Administrative functions
+(define-public (set-contract-pause (paused bool))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set contract-paused paused))
+    )
+)
+
+;; Read-only functions
+(define-read-only (get-campaign (campaign-id uint))
+    (map-get? campaigns { campaign-id: campaign-id })
+)
+
+(define-read-only (get-contribution (campaign-id uint) (contributor principal))
+    (map-get? contributions { campaign-id: campaign-id, contributor: contributor })
+)
 
 ;; Create a new crowdfunding campaign
-;; @param goal: funding goal in STX
-;; @param deadline: block height when campaign ends
 (define-public (create-campaign (goal uint) (deadline uint))
     (let
         (
             (campaign-id (var-get next-campaign-id))
         )
+        (asserts! (not (var-get contract-paused)) err-contract-paused)
         (asserts! (> goal u0) err-invalid-amount)
         (asserts! (> deadline block-height) err-deadline-passed)
         (asserts! (< deadline (+ block-height u10000)) err-invalid-deadline)
@@ -69,8 +87,6 @@
 )
 
 ;; Contribute STX to a campaign
-;; @param campaign-id: ID of the campaign
-;; @param amount: amount to contribute in STX
 (define-public (contribute (campaign-id uint) (amount uint))
     (let
         (
@@ -78,21 +94,19 @@
             (current-contribution (default-to { total-amount: u0 } 
                 (map-get? contributions { campaign-id: campaign-id, contributor: tx-sender })))
         )
+        (asserts! (not (var-get contract-paused)) err-contract-paused)
         (asserts! (<= block-height (get deadline campaign)) err-deadline-passed)
         (asserts! (> amount u0) err-invalid-amount)
         (asserts! (is-eq (get status campaign) (var-get campaign-status-active)) err-deadline-passed)
         (asserts! (<= amount (stx-get-balance tx-sender)) err-insufficient-balance)
         
-        ;; Transfer STX to contract
         (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
         
-        ;; Update campaign raised amount
         (map-set campaigns
             { campaign-id: campaign-id }
             (merge campaign { raised: (+ (get raised campaign) amount) })
         )
         
-        ;; Update contribution record
         (map-set contributions
             { campaign-id: campaign-id, contributor: tx-sender }
             { total-amount: (+ (get total-amount current-contribution) amount) }
@@ -101,5 +115,3 @@
         (ok true)
     )
 )
-
-[Rest of the contract remains the same...]
