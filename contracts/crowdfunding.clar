@@ -8,6 +8,17 @@
 (define-constant err-campaign-not-found (err u103))
 (define-constant err-goal-not-reached (err u104))
 (define-constant err-already-claimed (err u105))
+(define-constant err-insufficient-balance (err u106))
+(define-constant err-invalid-deadline (err u107))
+(define-constant err-contract-paused (err u108))
+
+;; Campaign status
+(define-data-var campaign-status-active uint u1)
+(define-data-var campaign-status-ended uint u2)
+(define-data-var campaign-status-claimed uint u3)
+
+;; Contract status
+(define-data-var contract-paused bool false)
 
 ;; Data structures
 (define-map campaigns
@@ -17,26 +28,46 @@
         goal: uint,
         deadline: uint,
         raised: uint,
-        claimed: bool
+        claimed: bool,
+        status: uint
     }
 )
 
 (define-map contributions
     { campaign-id: uint, contributor: principal }
-    { amount: uint }
+    { total-amount: uint }
 )
 
 ;; Data variables
 (define-data-var next-campaign-id uint u1)
 
-;; Public functions
+;; Administrative functions
+(define-public (set-contract-pause (paused bool))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set contract-paused paused))
+    )
+)
+
+;; Read-only functions
+(define-read-only (get-campaign (campaign-id uint))
+    (map-get? campaigns { campaign-id: campaign-id })
+)
+
+(define-read-only (get-contribution (campaign-id uint) (contributor principal))
+    (map-get? contributions { campaign-id: campaign-id, contributor: contributor })
+)
+
+;; Create a new crowdfunding campaign
 (define-public (create-campaign (goal uint) (deadline uint))
     (let
         (
             (campaign-id (var-get next-campaign-id))
         )
+        (asserts! (not (var-get contract-paused)) err-contract-paused)
         (asserts! (> goal u0) err-invalid-amount)
         (asserts! (> deadline block-height) err-deadline-passed)
+        (asserts! (< deadline (+ block-height u10000)) err-invalid-deadline)
         
         (map-set campaigns
             { campaign-id: campaign-id }
@@ -45,7 +76,8 @@
                 goal: goal,
                 deadline: deadline,
                 raised: u0,
-                claimed: false
+                claimed: false,
+                status: (var-get campaign-status-active)
             }
         )
         
@@ -54,81 +86,32 @@
     )
 )
 
-(define-public (contribute (campaign-id uint))
+;; Contribute STX to a campaign
+(define-public (contribute (campaign-id uint) (amount uint))
     (let
         (
             (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) err-campaign-not-found))
-            (amount (stx-get-balance tx-sender))
+            (current-contribution (default-to { total-amount: u0 } 
+                (map-get? contributions { campaign-id: campaign-id, contributor: tx-sender })))
         )
+        (asserts! (not (var-get contract-paused)) err-contract-paused)
         (asserts! (<= block-height (get deadline campaign)) err-deadline-passed)
         (asserts! (> amount u0) err-invalid-amount)
+        (asserts! (is-eq (get status campaign) (var-get campaign-status-active)) err-deadline-passed)
+        (asserts! (<= amount (stx-get-balance tx-sender)) err-insufficient-balance)
         
-        ;; Transfer STX to contract
         (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
         
-        ;; Update campaign raised amount
         (map-set campaigns
             { campaign-id: campaign-id }
             (merge campaign { raised: (+ (get raised campaign) amount) })
         )
         
-        ;; Record contribution
         (map-set contributions
             { campaign-id: campaign-id, contributor: tx-sender }
-            { amount: amount }
+            { total-amount: (+ (get total-amount current-contribution) amount) }
         )
         
         (ok true)
     )
-)
-
-(define-public (claim-funds (campaign-id uint))
-    (let
-        (
-            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) err-campaign-not-found))
-        )
-        (asserts! (is-eq (get owner campaign) tx-sender) err-owner-only)
-        (asserts! (> block-height (get deadline campaign)) err-deadline-passed)
-        (asserts! (>= (get raised campaign) (get goal campaign)) err-goal-not-reached)
-        (asserts! (not (get claimed campaign)) err-already-claimed)
-        
-        ;; Transfer funds to campaign owner
-        (try! (as-contract (stx-transfer? (get raised campaign) tx-sender (get owner campaign))))
-        
-        ;; Mark campaign as claimed
-        (map-set campaigns
-            { campaign-id: campaign-id }
-            (merge campaign { claimed: true })
-        )
-        
-        (ok true)
-    )
-)
-
-(define-public (refund (campaign-id uint))
-    (let
-        (
-            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) err-campaign-not-found))
-            (contribution (unwrap! (map-get? contributions { campaign-id: campaign-id, contributor: tx-sender }) err-campaign-not-found))
-        )
-        (asserts! (> block-height (get deadline campaign)) err-deadline-passed)
-        (asserts! (< (get raised campaign) (get goal campaign)) err-goal-not-reached)
-        
-        ;; Return contribution to sender
-        (try! (as-contract (stx-transfer? (get amount contribution) tx-sender tx-sender)))
-        
-        ;; Clear contribution record
-        (map-delete contributions { campaign-id: campaign-id, contributor: tx-sender })
-        
-        (ok true)
-    )
-)
-
-;; Read only functions
-(define-read-only (get-campaign (campaign-id uint))
-    (map-get? campaigns { campaign-id: campaign-id })
-)
-
-(define-read-only (get-contribution (campaign-id uint) (contributor principal))
-    (map-get? contributions { campaign-id: campaign-id, contributor: contributor })
 )
